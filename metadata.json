@@ -1,0 +1,6 @@
+{
+  "name": "DateAlarm",
+  "description": "A mobile-first alarm application with calendar integration, alarm history, custom tones, snooze, and dismiss options.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
