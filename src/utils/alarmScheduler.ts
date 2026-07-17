@@ -4,6 +4,7 @@
  */
 
 import { Alarm, AlarmHistoryItem, AlarmSettings } from '../types';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 // Constants for localStorage keys
 const KEYS = {
@@ -38,6 +39,7 @@ export interface SnoozingAlarm {
 
 let activeSnoozes: SnoozingAlarm[] = [];
 let triggeredAlarmIds = new Set<string>(); // Prevent double-triggering in same session
+const notificationIdMap = new Map<string, number>(); // Maps alarm.id -> native notification numeric id
 
 // Subscription lists
 type AlarmChangeListener = (alarms: Alarm[], history: AlarmHistoryItem[]) => void;
@@ -183,6 +185,32 @@ export function addAlarm(
 
   alarms.push(newAlarm);
   saveAlarms();
+
+  // --- Schedule Capacitor Native Hardware Alarm ---
+  try {
+    const alarmDateTime = new Date(`${date}T${time}:00`);
+    const numericId = Math.floor(Math.random() * 10000000);
+    notificationIdMap.set(newAlarm.id, numericId);
+
+    LocalNotifications.requestPermissions();
+
+    LocalNotifications.schedule({
+      notifications: [
+        {
+          title: 'DateAlarm Ringing!',
+          body: note.trim() || 'Your scheduled alarm is ringing!',
+          id: numericId,
+          schedule: { at: alarmDateTime, allowWhileIdle: true },
+          sound: 'res_bell.wav',
+          extra: { vibration },
+        },
+      ],
+    });
+  } catch (e) {
+    console.warn('Running outside a Capacitor device or permissions missing. Fallback timer active.', e);
+  }
+  // ------------------------------------------------------
+
   return newAlarm;
 }
 
@@ -190,11 +218,22 @@ export function toggleAlarm(id: string): void {
   const idx = alarms.findIndex((a) => a.id === id);
   if (idx !== -1) {
     alarms[idx].enabled = !alarms[idx].enabled;
+
     // If we are disabling the alarm, remove any active snooze
     if (!alarms[idx].enabled) {
       activeSnoozes = activeSnoozes.filter((s) => s.id !== id);
       triggeredAlarmIds.delete(id);
+
+      const numId = notificationIdMap.get(id);
+      if (numId !== undefined) {
+        try {
+          LocalNotifications.cancel({ notifications: [{ id: numId }] });
+        } catch (e) {
+          console.warn('Could not cancel native notification', e);
+        }
+      }
     }
+
     saveAlarms();
   }
 }
@@ -203,6 +242,17 @@ export function deleteAlarm(id: string): void {
   alarms = alarms.filter((a) => a.id !== id);
   activeSnoozes = activeSnoozes.filter((s) => s.id !== id);
   triggeredAlarmIds.delete(id);
+
+  const numId = notificationIdMap.get(id);
+  if (numId !== undefined) {
+    try {
+      LocalNotifications.cancel({ notifications: [{ id: numId }] });
+    } catch (e) {
+      console.warn('Could not cancel native notification', e);
+    }
+    notificationIdMap.delete(id);
+  }
+
   saveAlarms();
 }
 
@@ -256,12 +306,12 @@ function triggerAlarm(alarm: Alarm, isSnooze = false) {
 export function snoozeAlarm(alarmId: string, minutes: number): void {
   const alarm = alarms.find((a) => a.id === alarmId);
   const snoozeCount = (activeSnoozes.find((s) => s.id === alarmId)?.snoozeCount || 0) + 1;
-  
+
   // Remove existing snooze if any
   activeSnoozes = activeSnoozes.filter((s) => s.id !== alarmId);
 
   const triggerTime = Date.now() + minutes * 60 * 1000;
-  
+
   activeSnoozes.push({
     id: alarmId,
     note: alarm?.note || 'Snoozed alarm',
@@ -288,6 +338,7 @@ export function snoozeAlarm(alarmId: string, minutes: number): void {
 
   // Temporarily reset triggered ID so it can fire again when snooze is up
   triggeredAlarmIds.delete(`snooze_${alarmId}`);
+
   notifyChange();
 }
 
@@ -296,7 +347,7 @@ export function snoozeAlarm(alarmId: string, minutes: number): void {
  */
 export function dismissAlarm(alarmId: string): void {
   const alarm = alarms.find((a) => a.id === alarmId);
-  
+
   // Remove from active snoozes
   activeSnoozes = activeSnoozes.filter((s) => s.id !== alarmId);
 
@@ -321,6 +372,7 @@ export function dismissAlarm(alarmId: string): void {
   // Clear tracking
   triggeredAlarmIds.delete(alarmId);
   triggeredAlarmIds.delete(`snooze_${alarmId}`);
+
   notifyChange();
 }
 
@@ -338,7 +390,7 @@ function startTick() {
       if (!alarm.enabled) return;
 
       const alarmTime = new Date(`${alarm.date}T${alarm.time}:00`).getTime();
-      
+
       // If alarm is due or has passed by less than 1 minute (and hasn't been triggered in this tab session yet)
       if (alarmTime <= now && now - alarmTime < 60000) {
         const trackingId = alarm.id;
@@ -349,7 +401,7 @@ function startTick() {
       } else if (alarmTime < now - 60000 && alarm.enabled) {
         // Automatically move historical expired alarms to history if we opened the app way later
         alarm.enabled = false;
-        
+
         // Log it as dismissed/past alarm
         const historyItem: AlarmHistoryItem = {
           id: `hist_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
@@ -372,7 +424,7 @@ function startTick() {
         const trackingId = `snooze_${snooze.id}`;
         if (!triggeredAlarmIds.has(trackingId)) {
           triggeredAlarmIds.add(trackingId);
-          
+
           // Re-trigger alarm using details
           const tempAlarm: Alarm = {
             id: snooze.id,
@@ -383,6 +435,7 @@ function startTick() {
             vibration: snooze.vibration,
             enabled: true,
           };
+
           triggerAlarm(tempAlarm, true);
         }
       }
@@ -404,6 +457,7 @@ export function format12Hour(time24: string): string {
  */
 export function getUpcomingAlarmDescription(): string {
   const enabledAlarms = alarms.filter((a) => a.enabled);
+
   if (enabledAlarms.length === 0 && activeSnoozes.length === 0) {
     return 'No alarms set';
   }
